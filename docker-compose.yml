@@ -1,0 +1,112 @@
+
+version: "3.3"
+services:
+    traefik:
+        image: "traefik:v2.2"
+        container_name: "traefik"
+        command:
+        #- "--log.level=DEBUG"
+        - "--api.insecure=true"
+        - "--providers.docker=true"
+        - "--providers.docker.exposedbydefault=false"
+        - "--entrypoints.web.address=:80"
+        - "--entrypoints.web.http.redirections.entryPoint.to=websecure"
+        - "--entrypoints.web.http.redirections.entryPoint.scheme=https"
+        - "--entrypoints.websecure.address=:443"
+        - "--certificatesresolvers.myresolver.acme.httpchallenge=true"
+        - "--certificatesresolvers.myresolver.acme.httpchallenge.entrypoint=web"
+        #- "--certificatesresolvers.myresolver.acme.caserver=https://acme-staging-v02.api.letsencrypt.org/directory"
+        - "--certificatesresolvers.myresolver.acme.email=clausi9860@gmail.com"
+        - "--certificatesresolvers.myresolver.acme.storage=/letsencrypt/acme.json"
+        ports:
+        - "80:80"
+        - "443:443"
+        - "8080:8080"
+        volumes:
+        - "./traefik/letsencrypt:/letsencrypt"
+        - "/var/run/docker.sock:/var/run/docker.sock:ro"
+        restart: always
+    redirect:
+        image: morbz/docker-web-redirect
+        labels:
+            - "traefik.enable=true"
+            - "traefik.http.routers.redirect.rule=Host(`lak-bawue.de`) || Host(`sitzung.lak-bawue.de`) || Host(`www.lak-bawue.de`)"
+            - "traefik.http.routers.redirect.entrypoints=websecure"
+            - "traefik.http.routers.redirect.tls.certresolver=myresolver"
+        environment:
+            - REDIRECT_TARGET=https://bbb.coredu.eu/b/and-kdd-3z7
+        restart: always
+    
+    freescout:
+        image: tiredofit/freescout
+        labels:
+            - "traefik.enable=true"
+            - "traefik.http.routers.freescout.rule=Host(`freescout.clau.si`)"
+            #- "traefik.http.routers.freescout.rule=Host(`100.ip-51-38-98.eu`)"               
+            - "traefik.http.routers.freescout.entrypoints=websecure"
+            - "traefik.http.routers.freescout.tls.certresolver=myresolver"
+        container_name: freescout-app
+        links:
+        - freescout-db
+        volumes:
+        ### If you want to perform customizations to the source and have access to it, then uncomment this line - This includes modules
+        - ./freescout/data:/www/html
+        ### Or, if you just want to use Stock Freescout and hold onto persistent files like cache and session use this, one or the other.
+        #- ./freescout/data:/data
+        ### If you want to just keep the original source and add additional modules uncomment this line
+        #- ./modules:/www/html/Modules
+        - ./freescout/logs/:/www/logs
+        environment:
+        - VIRTUAL_HOST=freescout.clau.si
+        - VIRTUAL_NETWORK=nginx-proxy
+        - VIRTUAL_PORT=80
+        - ZABBIX_HOSTNAME=freescout-app
+        - DB_HOST=freescout-db
+        - DB_NAME=freescout
+        - DB_USER=freescout
+        - DB_PASS=freescout
+        - SITE_URL=https://freescout.clau.si
+        #- SITE_URL=https://100.ip-51-38-98.eu
+        - ADMIN_EMAIL=admin@admin.net
+        - ADMIN_PASS=freescout
+        - ENABLE_AUTO_UPDATE=TRUE
+        - ENABLE_SSL_PROXY=TRUE
+        - DISPLAY_ERRORS=FALSE
+        - TIMEZONE=Europe/Berlin
+        restart: always
+
+    freescout-db:
+        image: tiredofit/mariadb
+        container_name: freescout-db
+        volumes:
+        - ./freescout/db:/var/lib/mysql
+        environment:
+        - ROOT_PASS=password
+        - DB_NAME=freescout
+        - DB_USER=freescout
+        - DB_PASS=freescout
+        - ZABBIX_HOSTNAME=freescout-db
+        
+        restart: always
+
+    freescout-db-backup:
+        container_name: freescout-db-backup
+        image: tiredofit/db-backup
+        links:
+        - freescout-db
+        volumes:
+        - ./freescout/dbbackup:/backup
+        environment:
+        - ZABBIX_HOSTNAME=freescout-db-backup
+        - DB_HOST=freescout-db
+        - DB_TYPE=mariadb
+        - DB_NAME=freescout
+        - DB_USER=freescout
+        - DB_PASS=freescout
+        - DB_DUMP_FREQ=1440
+        - DB_DUMP_BEGIN=0000
+        - DB_CLEANUP_TIME=8640
+        - COMPRESSION=BZ
+        - TIMEZONE=Europe/Berlin
+        - MD5=TRUE
+        restart: always

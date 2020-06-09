@@ -1,0 +1,339 @@
+version: "3.3"
+secrets:
+    os_admin:
+      file: ./openslides/secrets/adminsecret.env
+    os_user:
+      file: ./openslides/secrets/usersecret.env
+
+services:
+    openslides-server:
+      image: openslides/openslides:latest
+      # Below is the default command.  You can uncomment it to override the
+      # number of workers, for example:
+      command: "gunicorn -w 8 --preload -b 0.0.0.0:8000 -k uvicorn.workers.UvicornWorker openslides.asgi:application"
+      # Uncomment the following line to use daphne instead of gunicorn:
+      # command: "daphne -b 0.0.0.0 -p 8000 openslides.asgi:application"
+      restart: always
+      volumes:
+        - "./openslides/personaldata:/app/personal_data"
+      depends_on:
+        - openslides-postfix
+        - openslides-postgres
+        - openslides-redis
+        - openslides-rediscache
+        - openslides-prioserver
+      networks:
+        - back
+      sysctls:
+        net.core.somaxconn: 1024
+        net.ipv4.ip_local_port_range: 1024 60999
+      environment:
+        # With this variable set this service will not attempt to prepare the
+        # instance by, e.g., running migations.  This is exclusively left up to
+        # the main service to avoid conflicts.
+        - SERVER_IS_SECONDARY=1
+    openslides-prioserver:
+      # This service is basically a simple copy of the main server service
+      # (above).  It will share all the same resources (e.g., DB, Redis)
+      # as the main server, so it is crucial that it is always kept at
+      # compatible versions.
+      image: openslides/openslides:latest
+      command: "gunicorn -w 1 --preload -b 0.0.0.0:8000
+        -k uvicorn.workers.UvicornWorker openslides.asgi:application"
+      restart: always
+      volumes:
+        - "./openslides/prio/personaldata:/app/personal_data"
+        - "./openslides/prio/staticfiles:/app/openslides/static"
+      depends_on:
+        - openslides-postfix
+        - openslides-postgres
+        - openslides-redis
+        - openslides-rediscache
+      networks:
+        - back
+      secrets:
+        - os_admin
+        - os_user
+
+    openslides-redis:
+      image: redis:alpine
+      restart: always
+      volumes:
+        - "./openslides/redisdata:/data"
+      networks:
+        - back
+
+    openslides-rediscache:
+      image: redis:alpine
+      restart: always
+      command: ["redis-server", "--save", ""]
+      networks:
+        - back
+
+    openslides-rediscache-slave:
+      image: redis:alpine
+      restart: always
+      command: ["redis-server", "--save", "", "--slaveof", "rediscache", "6379"]
+      networks:
+        - back
+
+    openslides-client:
+      build: ./openslides-docker-compose/client
+      restart: always
+      volumes:
+        - "./openslides/client/staticfiles:/usr/share/nginx/html"
+      depends_on:
+        - openslides-server
+      networks:
+        - back
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.openslides.rule=Host(`sitzung.lak-bawue.de`)"
+        - "traefik.http.routers.openslides.entrypoints=websecure"
+        - "traefik.http.routers.openslides.tls.certresolver=myresolver"
+
+    openslides-postgres:
+      image: sameersbn/postgresql:10
+      labels:
+        org.openslides.role: "postgres"
+      restart: always
+      volumes:
+        - "./openslides/dbdata:/var/lib/postgresql"
+      environment:
+        - DB_USER=openslides
+        - DB_PASS=openslides
+        - DB_NAME=openslides
+      networks:
+        - back
+
+    openslides-postfix:
+      build: ./openslides-docker-compose/postfix
+      image: openslides-postfix:latest
+      restart: always
+      environment:
+        - MYHOSTNAME=localhost
+        - RELAYHOST=localhost
+      networks:
+        - back
+
+    traefik:
+        image: "traefik:v2.2"
+        container_name: "traefik"
+        command:
+        #- "--log.level=DEBUG"
+        - "--api.insecure=true"
+        - "--providers.docker=true"
+        - "--providers.docker.exposedbydefault=false"
+        - "--entrypoints.web.address=:80"
+        - "--entrypoints.web.http.redirections.entryPoint.to=websecure"
+        - "--entrypoints.web.http.redirections.entryPoint.scheme=https"
+        - "--entrypoints.websecure.address=:443"
+        - "--certificatesresolvers.myresolver.acme.httpchallenge=true"
+        - "--certificatesresolvers.myresolver.acme.httpchallenge.entrypoint=web"
+        #- "--certificatesresolvers.myresolver.acme.caserver=https://acme-staging-v02.api.letsencrypt.org/directory"
+        - "--certificatesresolvers.myresolver.acme.email=clausi9860@gmail.com"
+        - "--certificatesresolvers.myresolver.acme.storage=/letsencrypt/acme.json"
+        ports:
+        - "80:80"
+        - "443:443"
+        - "8080:8080"
+        volumes:
+        - "./traefik/letsencrypt:/letsencrypt"
+        - "/var/run/docker.sock:/var/run/docker.sock:ro"
+        restart: always
+        networks:
+          - front
+          - back
+
+    redirect:
+        image: morbz/docker-web-redirect
+        labels:
+            - "traefik.enable=true"
+            - "traefik.http.routers.redirect.rule=Host(`lak-bawue.de`) ||  Host(`www.lak-bawue.de`)"
+            - "traefik.http.routers.redirect.entrypoints=websecure"
+            - "traefik.http.routers.redirect.tls.certresolver=myresolver"
+        environment:
+            - REDIRECT_TARGET=https://bbb.coredu.eu/b/and-kdd-3z7
+        restart: always
+        networks:
+            - back
+
+    freescout:
+        image: tiredofit/freescout
+        labels:
+            - "traefik.enable=true"
+            - "traefik.http.routers.freescout.rule=Host(`freescout.clau.si`)"
+            #- "traefik.http.routers.freescout.rule=Host(`100.ip-51-38-98.eu`)"               
+            - "traefik.http.routers.freescout.entrypoints=websecure"
+            - "traefik.http.routers.freescout.tls.certresolver=myresolver"
+        container_name: freescout-app
+        links:
+        - freescout-db
+        volumes:
+        ### If you want to perform customizations to the source and have access to it, then uncomment this line - This includes modules
+        - ./freescout//data:/www/html
+        ### Or, if you just want to use Stock Freescout and hold onto persistent files like cache and session use this, one or the other.
+        #- ./freescout/data:/data
+        ### If you want to just keep the original source and add additional modules uncomment this line
+        #- ./modules:/www/html/Modules
+        - ./freescout/logs/:/www/logs
+        environment:
+        - VIRTUAL_HOST=freescout.clau.si
+        - VIRTUAL_NETWORK=nginx-proxy
+        - VIRTUAL_PORT=80
+        - ZABBIX_HOSTNAME=freescout-app
+        - DB_HOST=freescout-db
+        - DB_NAME=freescout
+        - DB_USER=freescout
+        - DB_PASS=freescout
+        - SITE_URL=https://freescout.clau.si
+        #- SITE_URL=https://100.ip-51-38-98.eu
+        - ADMIN_EMAIL=admin@admin.net
+        - ADMIN_PASS=freescout
+        - ENABLE_AUTO_UPDATE=TRUE
+        - ENABLE_SSL_PROXY=TRUE
+        - DISPLAY_ERRORS=FALSE
+        - TIMEZONE=Europe/Berlin
+        restart: always
+        networks:
+            - back
+            
+    freescout-db:
+        image: tiredofit/mariadb
+        container_name: freescout-db
+        volumes:
+        - ./freescout/db:/var/lib/mysql
+        environment:
+        - ROOT_PASS=password
+        - DB_NAME=freescout
+        - DB_USER=freescout
+        - DB_PASS=freescout
+        - ZABBIX_HOSTNAME=freescout-db
+        restart: always
+        networks:
+            - back
+
+    freescout-db-backup:
+        container_name: freescout-db-backup
+        image: tiredofit/db-backup
+        links:
+        - freescout-db
+        volumes:
+        - ./dbbackup:/backup
+        environment:
+        - ZABBIX_HOSTNAME=freescout-db-backup
+        - DB_HOST=freescout-db
+        - DB_TYPE=mariadb
+        - DB_NAME=freescout
+        - DB_USER=freescout
+        - DB_PASS=freescout
+        - DB_DUMP_FREQ=1440
+        - DB_DUMP_BEGIN=0000
+        - DB_CLEANUP_TIME=8640
+        - COMPRESSION=BZ
+        - TIMEZONE=Europe/Berlin
+        - MD5=TRUE
+        restart: always
+        networks:
+            - back
+    ferdi-server:
+      image: getferdi/ferdi-server
+      container_name: ferdi-server
+      environment:
+      - NODE_ENV=development
+      - DB_CONNECTION=ferdi-db
+      - DB_HOST=ferdi-db
+      - DB_PORT=3363
+      - DB_USER=ferdi
+      - DB_PASSWORD=ferdi
+      - DB_DATABASE=ferdi
+      - IS_CREATION_ENABLED=true
+      - CONNECT_WITH_FRANZ=true
+      - IS_REGISTRATION_ENABLED=true 
+      - IS_DASHBOARD_ENABLED=true
+      volumes:
+      - ./ferdi/config/:/config
+      - ./ferdi/db/:/usr/src/app/database
+      - ./ferdi/recipes/:/usr/src/app/recipes
+      restart: unless-stopped
+      networks:
+        - back
+    ferdi-db:
+      image: tiredofit/mariadb
+      container_name: ferdi-db
+      volumes:
+      - ./ferdi/db:/var/lib/mysql
+      environment:
+      - ROOT_PASS=password
+      - DB_NAME=ferdi
+      - DB_USER=ferdi
+      - DB_PASS=ferdi
+      - ZABBIX_HOSTNAME=ferdi-db
+      restart: always
+      networks:
+        - back
+    ferdi-db-backup:
+      container_name: ferdi-db-backup
+      image: tiredofit/db-backup
+      links:
+      - ferdi-db
+      volumes:
+      - ./ferdi/dbbackup:/backup
+      environment:
+      - ZABBIX_HOSTNAME=ferdi-db-backup
+      - DB_HOST=ferdi-db
+      - DB_TYPE=mariadb
+      - DB_NAME=ferdi
+      - DB_USER=ferdi
+      - DB_PASS=ferdi
+      - DB_DUMP_FREQ=1440
+      - DB_DUMP_BEGIN=0000
+      - DB_CLEANUP_TIME=8640
+      - COMPRESSION=BZ
+      - TIMEZONE=Europe/Berlin
+      - MD5=TRUE
+      restart: always
+      networks:
+        - back
+    groupmanagementbot:
+      build: ./groupmanagementbot/bot_root
+      # UNCOMMENT THIS AND COMMENT OUT THE build SECTION, IF YOU
+      # GET YOUR IMAGE FROM DOCKERHUB INSTEAD OF A LOCAL REPOSITORY
+      # image: gmb
+      container_name: bot_gmb
+      restart: unless-stopped
+      ports:
+        - 5000:5000
+      volumes:
+        # IF YOU WANT TO DEFINE YOUR CONFIG IN A JSON FILE INSTEAD
+        # OF THE ENVIRONMENT FILE, UNCOMMENT THIS AND COMMENT OUT
+        # THE env_file SECTION.
+        # THEN YOU CAN SAVE YOUR CONFIG IN ./config/config.json
+        # - ./config:/gmb/config
+        - ./groupmanagementbot/out:/gmb/out
+        - ./groupmanagementbot/status:/gmb/status
+      env_file:
+        - ./groupmanagementbot/bot_root/config/config.env
+      environment:
+        - PYTHONUNBUFFERED=1
+        # IF YOU WANT TO DEFINE YOUR CONFIG HERE INSTEAD OF
+        # THE ENVIRONMENT FILE, UNCOMMENT THIS AND COMMENT
+        # OUT THE env_file SECTION
+        # - TOKEN=
+        # - MYSQL_DB_HOST=127.0.0.1
+        # - MYSQL_DB_USERNAME=
+        # - MYSQL_DB_PASSWORD=
+        # - MYSQL_DB_DATABASE=gmb
+        # - MYSQL_TEST_DB_HOST=127.0.0.1
+        # - MYSQL_TEST_DB_USERNAME=
+        # - MYSQL_TEST_DB_PASSWORD=
+        # - MYSQL_TEST_DB_DATABASE=gmbtest
+        # - MASTER_ADMIN_ID=11111111
+        # - PLUGIN_BLACKLIST=network_fff
+        # - DEBUG_MODE=False
+      networks:
+            - front
+            - back
+networks:
+  front:
+  back:
